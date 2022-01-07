@@ -153,12 +153,37 @@ Current abilities @ 1/4/21
 -coarse detune
 -LFO detune
 -noise into oscillator mixer
-TODO: fine detune, fm between operators? oscillator mix
+-fine detune
+-oscillator mix
+
+TODO: 
+- fm between operators? 
+- patch saving?
 
 */
 
 #include "MIDIUSB.h"
 #include <math.h> //<cmath> in case of c++
+
+// util //
+const int ledPin = 13;
+int midi_counter = 0;
+char buff[100];
+void poly_debug(char * buff, int voicenum, int nvoices, int * freqtable){
+  sprintf(buff, "voicenum: %2d, [ ", voicenum);
+  Serial.print(buff);
+  for (int i=0; i<nvoices; i++){
+    if (freqtable[i] == -1){
+      Serial.print("_");
+    }
+    else{
+      Serial.print("x");
+    }
+    Serial.print(" ");
+  }
+  Serial.println("]");
+}
+
 
 // helper functions
 void midi_monitor(midiEventPacket_t rx) {
@@ -219,7 +244,7 @@ float exp_map(float x){ // 0-1 -> 0, 1, exponential
   return (1/(e-1)*(exp(x/127)-1));
 }
 
-float pow_map(float x, int n = 3){ // 0-127 -> 0, 1, exponential
+float pow_map(float x, int n = 3){ // 0-1 -> 0, 1, polynomial
   return pow(x, n);
 }
 
@@ -232,6 +257,13 @@ float fine_detune = 0;
 int coarse_detune = 0;
 float detune_ratios[25] = {1/2.0, 1/1.888, 1/1.782, 1/1.682, 1/1.587, 1/1.498, 1/1.414, 1/1.334, 1/1.260, 1/1.189, 1/1.122,  1/1.059,
                             1.0, 1.059, 1.122, 1.189, 1.260, 1.334, 1.414, 1.498, 1.587, 1.682, 1.782, 1.888, 2};
+float SEMITONE_RATIO = (pow(2, 1.0/12.0));
+float fine_detune_map(byte cc){// semitones
+  float det = (SEMITONE_RATIO-1)*pow(map_cc_to_range_linear(cc, -1, 1), 3);
+  sprintf(buff, "detune: %4f SEMITONE_RATIO: %4f", det, SEMITONE_RATIO);
+  Serial.println(buff);
+  return det;
+}
 
 class Voice {
   public:
@@ -270,16 +302,13 @@ class Voice {
 
     }
 
-    void set_osc_frequency(float note_freq, int coarse_detune){
-      this->m_osc1->frequency(note_freq);
-      this->m_osc2->frequency(note_freq*detune_ratios[coarse_detune]);
+    void set_osc_frequency(float note_freq, int coarse_detune, float fine_detune){
+      this->m_osc1->frequency(note_freq*(1));
+      this->m_osc2->frequency(note_freq*detune_ratios[coarse_detune]*(1+fine_detune));
     }
 
     void noteOn(float note_freq){
-      this->set_osc_frequency(note_freq, coarse_detune);
-      // for(int i=0; i<n_osc; i++){
-      //   this->m_osc[i]->frequency(note_freq);
-      // }
+      this->set_osc_frequency(note_freq, coarse_detune, fine_detune);
       this->m_env->noteOn();
       this->m_fenv->noteOn();
     }
@@ -287,8 +316,6 @@ class Voice {
     void noteOff(){
       this->m_env->noteOff();
     }
-
-
 
     AudioSynthWaveformModulated* m_osc1;
     AudioSynthWaveformModulated* m_osc2;
@@ -329,24 +356,7 @@ float MIN_LFO_FREQ = 0.01;
 int freq_multiplier = 1;
 
 
-// util //
-const int ledPin = 13;
-int midi_counter = 0;
-char buff[100];
-void poly_debug(char * buff, int voicenum, int nvoices, int * freqtable){
-  sprintf(buff, "voicenum: %2d, [ ", voicenum);
-  Serial.print(buff);
-  for (int i=0; i<nvoices; i++){
-    if (freqtable[i] == -1){
-      Serial.print("_");
-    }
-    else{
-      Serial.print("x");
-    }
-    Serial.print(" ");
-  }
-  Serial.println("]");
-}
+
 
 // FX //
 const int waveshape_len = 129;
@@ -355,6 +365,227 @@ float waveshape_arr[waveshape_len];
 const int CHORUS_DELAY_LENGTH (16*AUDIO_BLOCK_SAMPLES); // Number of samples in each delay line
 short delayline[CHORUS_DELAY_LENGTH]; // Allocate the delay line
 int n_chorus = 2;
+
+void modifyPatch(int cc, byte val){
+  if (cc == 7){ // volume
+          AudioNoInterrupts();
+          amp1.gain(map_cc_to_range_linear(val, 0.0, 1.0));
+          AudioInterrupts();
+        }
+        if (cc == 8){ // pan
+          AudioNoInterrupts();
+          // constant power panning (https://www.cs.cmu.edu/~music/icm-online/readings/panlaws/)
+          float theta = map_cc_to_range_linear(val, 0.0, PI/2);
+          mixerL.gain(0, cos(theta));
+          mixerR.gain(0, sin(theta));
+          AudioInterrupts();
+        }
+        if (cc == 20){ // filter env atk
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            voices[i].m_fenv->attack(cc_to_millis(val));
+          }
+          AudioInterrupts();
+        }
+        if (cc == 21){ // filter env decay
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            voices[i].m_fenv->decay(cc_to_millis(val));
+          }
+          AudioInterrupts();
+        }
+        if (cc == 22){ // filter env sustain
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            voices[i].m_fenv->sustain(map_cc_to_range_linear(val, 0.0, 1.0));
+          }
+          AudioInterrupts();
+        }
+        if (cc == 23){ // filter env release
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            voices[i].m_fenv->release(cc_to_millis(val));
+          }
+          AudioInterrupts();
+        }
+        if (cc == 32){ // dc offset
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            float offset_amt = map_cc_to_range_linear(val, 0, 1.0);
+            voices[i].m_osc1->offset(offset_amt); 
+            voices[i].m_osc2->offset(offset_amt); 
+            // for (int ii=0; ii<n_osc; ii++){
+            //   voices[i].m_osc[ii]->offset(offset_amt); 
+            // }
+          }
+          AudioInterrupts();
+        }
+        if (cc == 33){ // pulsewidth
+          AudioNoInterrupts();
+          pulsewidth_dc.amplitude(map_cc_to_range_linear(val, 0.5, 1.0));
+          AudioInterrupts();
+        }
+        
+        if (cc == 34){ // wavefolder dc
+          AudioNoInterrupts();
+          wavefold_dc.amplitude(map_cc_to_range_linear(val, 0.1, 1.0));
+          AudioInterrupts();
+        }
+        if (cc == 35){ // coarse detune
+          AudioNoInterrupts();
+          coarse_detune = (int)map_cc_to_range_linear(val, 0, 24.99);
+          for (int i=0; i<nvoices; i++){
+            if (freqtable[i] !=-1){ // if voice isn't playing
+              voices[i].set_osc_frequency(noteToFreq(freqtable[i]), coarse_detune, fine_detune);
+            }
+          }
+          AudioInterrupts();
+        }
+        if (cc == 36){ // fine detune
+          AudioNoInterrupts();
+          fine_detune = fine_detune_map(val);
+          for (int i=0; i<nvoices; i++){
+            if (freqtable[i] !=-1){ // if voice isn't playing
+              voices[i].set_osc_frequency(noteToFreq(freqtable[i]), coarse_detune, fine_detune);
+            }
+          }
+          AudioInterrupts();
+        }
+        if (cc == 37){ // osc mix
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            // constant power blending (https://www.cs.cmu.edu/~music/icm-online/readings/panlaws/)
+            float theta = map_cc_to_range_linear(val, 0.0, PI/2);
+            voices[i].m_oscmixer->gain(0, cos(theta));
+            voices[i].m_oscmixer->gain(1, sin(theta));
+          }
+          AudioInterrupts();
+        }
+        if (cc == 39){ // pink noise
+          AudioNoInterrupts();
+          float noise_amt = pow_map(map_cc_to_range_linear(val, 0, 1), 2);
+          // pink1.amplitude(noise_amt);
+          for (int i=0; i<nvoices; i++){
+            voices[i].m_oscmixer->gain(2, noise_amt);
+          }
+          AudioInterrupts();
+        }
+
+        if (cc == 48){ // LFO1 amplitude
+          AudioNoInterrupts();
+          lfoosc1.amplitude(
+            pow_map(map_cc_to_range_linear(val, 0.1, 1.0), 3));
+          AudioInterrupts();
+        }
+        if (cc == 49){ // LFO1 frequency
+          AudioNoInterrupts();
+          lfoosc1.frequency(MIN_LFO_FREQ*freq_multiplier*noteToFreq(map_cc_to_range_linear(val, 0.0, 100)));
+          AudioInterrupts();
+        }
+        if (cc == 50){ // LFO1 frequency multiplier
+          AudioNoInterrupts();
+          freq_multiplier = mults[(int)map_cc_to_range_linear(val, 0, 7)];
+          lfoosc1.frequency(MIN_LFO_FREQ*freq_multiplier*noteToFreq(map_cc_to_range_linear(val, 0.0, 100)));
+          AudioInterrupts();
+        }
+        
+        if (cc == 70){ // waveform
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            int wave_t = (int)map_cc_to_range_linear(val, 0.0, 3.99);
+            voices[i].m_osc1->begin(WAVEFORM_TYPE[wave_t]);
+            voices[i].m_osc2->begin(WAVEFORM_TYPE[wave_t]);
+          }
+          AudioInterrupts();
+        }
+        if (cc == 71){ // filter resonance
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            voices[i].m_filter->resonance(map_cc_to_range_linear(val, 0.707, 5.0));
+          }
+          AudioInterrupts();
+        }
+        
+        if (cc == 72){ // sound release
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            voices[i].m_env->release(cc_to_millis(val));
+          }
+          AudioInterrupts();
+        }
+        if (cc == 73){ // sound attack
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            voices[i].m_env->attack(cc_to_millis(val));
+          }
+          AudioInterrupts();
+        }
+        if (cc == 74){ // filter cutoff
+          float note_freq = noteToFreq(map_cc_to_range_linear(val, 0, 113));
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            voices[i].m_filter->frequency(note_freq);
+          }
+          AudioInterrupts();
+        }
+        if (cc == 75){ // sustain
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            voices[i].m_env->sustain(map_cc_to_range_linear(val, 0.0, 1.0));
+          }
+          AudioInterrupts();
+        }
+        if (cc == 76){ // fenv amt
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            voices[i].m_fc->amplitude(map_cc_to_range_linear(val, -1.0, 3.0), 1);
+          }
+          AudioInterrupts();
+        }
+        if (cc == 80){ // sound release
+          AudioNoInterrupts();
+          for(int i=0; i < nvoices; i++){
+            voices[i].m_env->decay(cc_to_millis(val));
+          }
+          AudioInterrupts();
+        }
+        if (cc == 85){ // Reverb room size
+          AudioNoInterrupts();
+            freeverbs1.roomsize(map_cc_to_range_linear(val, 0.1, 1));
+            freeverbs2.roomsize(map_cc_to_range_linear(val, 0.1, 0.25));
+          AudioInterrupts();
+        }
+        if (cc == 86){ // Reverb damping
+          AudioNoInterrupts();
+            freeverbs1.damping(map_cc_to_range_linear(val, 0.0, 1));
+            freeverbs2.damping(map_cc_to_range_linear(val, 0.0, 0.5));
+          AudioInterrupts();
+        }
+        if (cc == 87){ // Bit depth
+          AudioNoInterrupts();
+          bitcrusher1.bits((int)map_cc_to_range_linear(val, 0.0, 16.0));
+          AudioInterrupts();
+        }
+
+        if (cc == 88){ // sampling rate
+          AudioNoInterrupts();
+          float sr = 4*noteToFreq(map_cc_to_range_linear(val, 0, 127));
+          bitcrusher1.sampleRate((int)sr);
+          AudioInterrupts();
+        }
+        
+        if (cc == 91){ // Reverb send 
+          AudioNoInterrupts();
+          reverbamp.gain(map_cc_to_range_linear(val, 0, 0.5));
+          AudioInterrupts();
+        }
+        if (cc == 93){ // chorus amount
+          AudioNoInterrupts();
+          mixerL.gain(3,map_cc_to_range_linear(val, 0, 1.0));
+          mixerR.gain(3,map_cc_to_range_linear(val, 0, 1.0));
+          AudioInterrupts();
+        }
+}
 
 void setup() {
   // put your setup code here, to run once:
@@ -457,209 +688,7 @@ void loop() {
       }
 
       else if (rx.header == 0x0B){ // control change
-        if ((int)rx.byte2 == 7){ // volume
-          AudioNoInterrupts();
-          amp1.gain(map_cc_to_range_linear(rx.byte3, 0.0, 1.0));
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 8){ // pan
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            // constant power panning (https://www.cs.cmu.edu/~music/icm-online/readings/panlaws/)
-            float theta = map_cc_to_range_linear(rx.byte3, 0.0, PI/2);
-            mixerL.gain(0, cos(theta));
-            mixerR.gain(0, sin(theta));
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 20){ // filter env atk
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            voices[i].m_fenv->attack(cc_to_millis(rx.byte3));
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 21){ // filter env decay
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            voices[i].m_fenv->decay(cc_to_millis(rx.byte3));
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 22){ // filter env sustain
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            voices[i].m_fenv->sustain(map_cc_to_range_linear(rx.byte3, 0.0, 1.0));
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 23){ // filter env release
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            voices[i].m_fenv->release(cc_to_millis(rx.byte3));
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 32){ // dc offset
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            float offset_amt = map_cc_to_range_linear(rx.byte3, 0, 1.0);
-            voices[i].m_osc1->offset(offset_amt); 
-            voices[i].m_osc2->offset(offset_amt); 
-            // for (int ii=0; ii<n_osc; ii++){
-            //   voices[i].m_osc[ii]->offset(offset_amt); 
-            // }
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 33){ // pulsewidth
-          AudioNoInterrupts();
-          pulsewidth_dc.amplitude(map_cc_to_range_linear(rx.byte3, 0.5, 1.0));
-          AudioInterrupts();
-        }
-        
-        if ((int)rx.byte2 == 34){ // wavefolder dc
-          AudioNoInterrupts();
-          wavefold_dc.amplitude(map_cc_to_range_linear(rx.byte3, 0.1, 1.0));
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 35){ // coarse detune
-          AudioNoInterrupts();
-          coarse_detune = (int)map_cc_to_range_linear(rx.byte3, 0, 24.99);
-          for (int i=0; i<nvoices; i++){
-            voices[i].set_osc_frequency(noteToFreq(freqtable[i]), coarse_detune);
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 37){ // pink noise
-          AudioNoInterrupts();
-          float noise_amt = pow_map(map_cc_to_range_linear(rx.byte3, 0, 1), 2);
-          // pink1.amplitude(noise_amt);
-          for (int i=0; i<nvoices; i++){
-            voices[i].m_oscmixer->gain(2, noise_amt);
-          }
-          AudioInterrupts();
-        }
-
-        if ((int)rx.byte2 == 48){ // LFO1 amplitude
-          AudioNoInterrupts();
-          lfoosc1.amplitude(
-            pow_map(map_cc_to_range_linear(rx.byte3, 0.1, 1.0), 3));
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 49){ // LFO1 frequency
-          AudioNoInterrupts();
-          lfoosc1.frequency(MIN_LFO_FREQ*freq_multiplier*noteToFreq(map_cc_to_range_linear(rx.byte3, 0.0, 100)));
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 50){ // LFO1 frequency multiplier
-          AudioNoInterrupts();
-          freq_multiplier = mults[(int)map_cc_to_range_linear(rx.byte3, 0, 7)];
-          lfoosc1.frequency(MIN_LFO_FREQ*freq_multiplier*noteToFreq(map_cc_to_range_linear(rx.byte3, 0.0, 100)));
-          AudioInterrupts();
-        }
-        
-        if ((int)rx.byte2 == 70){ // waveform
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            int wave_t = (int)map_cc_to_range_linear(rx.byte3, 0.0, 3.99);
-            voices[i].m_osc1->begin(WAVEFORM_TYPE[wave_t]);
-            voices[i].m_osc2->begin(WAVEFORM_TYPE[wave_t]);
-            // for (int ii=0; ii<n_osc; ii++){
-            //   voices[i].m_osc[ii]->begin(
-            //     WAVEFORM_TYPE[wave_t]);
-            // }
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 71){ // filter resonance
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            voices[i].m_filter->resonance(map_cc_to_range_linear(rx.byte3, 0.707, 5.0));
-          }
-          AudioInterrupts();
-        }
-        
-        if ((int)rx.byte2 == 72){ // sound release
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            voices[i].m_env->release(cc_to_millis(rx.byte3));
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 73){ // sound attack
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            voices[i].m_env->attack(cc_to_millis(rx.byte3));
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 74){ // filter cutoff
-          float note_freq = noteToFreq(map_cc_to_range_linear(rx.byte3, 0, 113));
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            voices[i].m_filter->frequency(note_freq);
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 75){ // sustain
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            voices[i].m_env->sustain(map_cc_to_range_linear(rx.byte3, 0.0, 1.0));
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 76){ // fenv amt
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            voices[i].m_fc->amplitude(map_cc_to_range_linear(rx.byte3, -1.0, 3.0), 1);
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 80){ // sound release
-          AudioNoInterrupts();
-          for(int i=0; i < nvoices; i++){
-            voices[i].m_env->decay(cc_to_millis(rx.byte3));
-          }
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 85){ // Reverb room size
-          AudioNoInterrupts();
-            freeverbs1.roomsize(map_cc_to_range_linear(rx.byte3, 0.1, 1));
-            freeverbs2.roomsize(map_cc_to_range_linear(rx.byte3, 0.1, 0.25));
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 86){ // Reverb damping
-          AudioNoInterrupts();
-            freeverbs1.damping(map_cc_to_range_linear(rx.byte3, 0.0, 1));
-            freeverbs2.damping(map_cc_to_range_linear(rx.byte3, 0.0, 0.5));
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 87){ // Bit depth
-          AudioNoInterrupts();
-          bitcrusher1.bits((int)map_cc_to_range_linear(rx.byte3, 0.0, 16.0));
-          AudioInterrupts();
-        }
-
-        if ((int)rx.byte2 == 88){ // sampling rate
-          AudioNoInterrupts();
-          float sr = 4*noteToFreq(map_cc_to_range_linear(rx.byte3, 0, 127));
-          bitcrusher1.sampleRate((int)sr);
-          AudioInterrupts();
-        }
-        
-        if ((int)rx.byte2 == 91){ // Reverb send 
-          AudioNoInterrupts();
-          reverbamp.gain(map_cc_to_range_linear(rx.byte3, 0, 0.5));
-          AudioInterrupts();
-        }
-        if ((int)rx.byte2 == 93){ // chorus amount
-          AudioNoInterrupts();
-          mixerL.gain(3,map_cc_to_range_linear(rx.byte3, 0, 1.0));
-          mixerR.gain(3,map_cc_to_range_linear(rx.byte3, 0, 1.0));
-          AudioInterrupts();
-        }
-
+        modifyPatch((int)rx.byte2, (int)rx.byte3);
       }
     }
       
