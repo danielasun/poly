@@ -146,6 +146,13 @@ int initPatchStorage(){
   return status;
 }
 
+void printPatch(byte patch[], char buff[]){
+  for (int i=0; i < nparams; i++){
+    sprintf(buff, "i: %d, param: %s val: %d", i, parameter_names[i], patch[i]);
+    Serial.println(buff);
+  }
+}
+
 
 
 //void setup()

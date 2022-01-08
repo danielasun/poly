@@ -229,8 +229,20 @@ void midi_monitor(midiEventPacket_t rx) {
 
 // midi & synthesis
 float noteToFreq(int note) {
-    float a = 440; //frequency of A (common value is 440Hz)
-    return (a / 32) * pow(2, ((note - 9) / 12.0));
+  float a = 440; //frequency of A (common value is 440Hz)
+  return (a / 32) * pow(2, ((note - 9) / 12.0));
+}
+
+float noteToFreq(float note){
+  return pow(2, (note-69)/12)*440.0;
+}
+
+float noteToFreqRatio(float note){
+  return pow(2, note/12.0);
+}
+
+float freqToNote(float freq){
+  return 12*log(freq/440.0)/log(2) + 69;
 }
 
 const float e=exp(1);
@@ -308,8 +320,11 @@ float fine_detune_map(byte cc){// semitones
   return  (SEMITONE_RATIO-1)*pow(map_cc_to_range_linear(cc, -1, 1), 3);
 }
 
+// filter //
 float fc_freq = noteToFreq(127); // filter cutoff frequency
 float keytrack_amt = 0; // number from 0 to 1 setting how much the filter tracks the note.
+int keytrack_pivot = 60;
+float FILTER_MAX_FREQ = 10000.0;
 
 // LFO //
 float mults[8] = {1, 2, 4, 8, 16, 32, 64, 128};
@@ -361,7 +376,6 @@ class Voice {
       this->m_osc2->begin(0.4, 220, WAVEFORM_SAWTOOTH);
       this->m_oscmixer->gain(2, 0);
       this->m_fmodmixer->gain(0, 1);
-      // this->m_fmodmixer->gain(1, 0);
 
 
     }
@@ -405,12 +419,12 @@ int freqtable[nvoices] = {-1, -1, -1, -1}; // holds frequencies
 void voice_set_filter_frequency(int voicenum, float fc_freq, float keytrack_amt){
   
   if (freqtable[voicenum] != -1){ // set freq if voice is playing
-    float note_freq = noteToFreq(freqtable[voicenum]);
-
-    // set frequency according to note that's being played.
-    float filter_freq = note_freq*keytrack_amt + (1-keytrack_amt)*fc_freq;
-    voices[voicenum].m_filter->frequency(filter_freq);
-    Serial.println(filter_freq);
+    // offset frequency according to note that's being played.
+    float freq_offset = keytrack_amt*(freqtable[voicenum] - keytrack_pivot);
+    float filter_freq = noteToFreq(freqToNote(fc_freq) + freq_offset);
+    voices[voicenum].m_filter->frequency(min(filter_freq, FILTER_MAX_FREQ));
+    sprintf(buff, "%f %f", freq_offset, filter_freq);
+    Serial.print(buff);
   }
 
 }
@@ -612,6 +626,11 @@ void setup() {
   pinMode(ledPin, OUTPUT);
   amp1.gain(1);
 
+  for (int i = 0; i<128; i++){
+    sprintf(buff, "%f, %f", noteToFreq((float)i), noteToFreq(i));
+    Serial.println(buff);
+  }
+
   //voices init
   for(int i=0; i<nvoices; i++){
       voicemixer.gain(i, 0.25);
@@ -626,6 +645,8 @@ void setup() {
     Serial.println(buff);
     modifyPatch(i, patch::initpatch[i]);
   }
+
+  patch::printPatch(patch::initpatch, buff);
   
   fmmixer.gain(0, 0.0);
   pulsewidth_mixer.gain(1, 0);
