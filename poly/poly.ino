@@ -182,12 +182,13 @@ Current abilities @ 1/4/21
 -fine detune
 -oscillator mix
 -loading patch, parameter names (for now, just from an array)
+- filter keytrack
 
 TODO: 
 - fm between operators? 
 - patch saving?
-- filter keytracking would be nice.
 
+- use isActive() vs. freqtable[i] == -1 to detect if voices are done playing.
 */
 
 #include "MIDIUSB.h"
@@ -296,7 +297,7 @@ float tri_map(float x, int i){ // 0 - pi -> 0-1
 int WAVEFORM_TYPE[] = {WAVEFORM_BANDLIMIT_SAWTOOTH, WAVEFORM_BANDLIMIT_PULSE, WAVEFORM_TRIANGLE_VARIABLE, WAVEFORM_SINE};
 
 
-// Voice class
+// Global params
 const int n_osc = 2;
 float fine_detune = 0;
 int coarse_detune = 0;
@@ -304,11 +305,11 @@ float detune_ratios[25] = {1/2.0, 1/1.888, 1/1.782, 1/1.682, 1/1.587, 1/1.498, 1
                             1.0, 1.059, 1.122, 1.189, 1.260, 1.334, 1.414, 1.498, 1.587, 1.682, 1.782, 1.888, 2};
 float SEMITONE_RATIO = (pow(2, 1.0/12.0));
 float fine_detune_map(byte cc){// semitones
-  float det = (SEMITONE_RATIO-1)*pow(map_cc_to_range_linear(cc, -1, 1), 3);
-//  sprintf(buff, "detune: %4f SEMITONE_RATIO: %4f", det, SEMITONE_RATIO);
-//  Serial.println(buff);
-  return det;
+  return  (SEMITONE_RATIO-1)*pow(map_cc_to_range_linear(cc, -1, 1), 3);
 }
+
+float fc_freq = noteToFreq(127); // filter cutoff frequency
+float keytrack_amt = 0; // number from 0 to 1 setting how much the filter tracks the note.
 
 // LFO //
 float mults[8] = {1, 2, 4, 8, 16, 32, 64, 128};
@@ -323,7 +324,7 @@ const int CHORUS_DELAY_LENGTH (16*AUDIO_BLOCK_SAMPLES); // Number of samples in 
 short delayline[CHORUS_DELAY_LENGTH]; // Allocate the delay line
 int n_chorus = 2;
 
-
+// Voice class
 class Voice {
   public:
     Voice(AudioSynthWaveformModulated* wave1,
@@ -401,15 +402,27 @@ int voicenum = 0;
 Voice voices[nvoices] = {v1, v2, v3, v4};
 int freqtable[nvoices] = {-1, -1, -1, -1}; // holds frequencies
 
+void voice_set_filter_frequency(int voicenum, float fc_freq, float keytrack_amt){
+  
+  if (freqtable[voicenum] != -1){ // set freq if voice is playing
+    float note_freq = noteToFreq(freqtable[voicenum]);
+
+    // set frequency according to note that's being played.
+    float filter_freq = note_freq*keytrack_amt + (1-keytrack_amt)*fc_freq;
+    voices[voicenum].m_filter->frequency(filter_freq);
+    Serial.println(filter_freq);
+  }
+
+}
 
 void voice_noteOn(int voicenum, float note_freq, int note, int velocity){
   voices[voicenum].noteOn(note_freq);
   freqtable[voicenum] = note;
   voices[voicenum].m_osc1->amplitude(velocityToAmplitude[velocity]);
   voices[voicenum].m_osc2->amplitude(velocityToAmplitude[velocity]);
-  // for (int ii=0; ii<n_osc; ii++){
-  //   voices[voicenum].m_osc[ii]->amplitude(velocityToAmplitude[velocity]);
-  // }
+  if (keytrack_amt > 0){
+    voice_set_filter_frequency(voicenum, fc_freq, keytrack_amt);
+  }
 }
 
 void modifyPatch(int cc, byte val){
@@ -524,9 +537,9 @@ void modifyPatch(int cc, byte val){
     }
   }
   if (cc == 74){ // filter cutoff
-    float note_freq = noteToFreq(map_cc_to_range_linear(val, 0, 127)); // used to be 113
+    fc_freq = noteToFreq(map_cc_to_range_linear(val, 0, 127)); // used to be 113
     for(int i=0; i < nvoices; i++){
-      voices[i].m_filter->frequency(note_freq);
+      voice_set_filter_frequency(i, fc_freq, keytrack_amt);
     }
   }
   if (cc == 75){ // sustain
@@ -552,6 +565,12 @@ void modifyPatch(int cc, byte val){
   if (cc == 78){ // f mod
     for(int i=0; i < nvoices; i++){
       voices[i].m_fmodmixer->gain(1, map_cc_to_range_linear(val, 0, 1.0)); // LFO1 mod
+    }
+  }
+  if (cc == 79){ // keytrack
+    keytrack_amt = map_cc_to_range_linear(val, 0, 1.0);
+    for(int i=0; i < nvoices; i++){
+      voice_set_filter_frequency(i, fc_freq, keytrack_amt);
     }
   }
   if (cc == 80){ // sound release
@@ -586,7 +605,7 @@ void modifyPatch(int cc, byte val){
 
 void setup() {
   // put your setup code here, to run once:
-  AudioMemory(200);
+  AudioMemory(400);
   sgtl5000_1.enable();
   sgtl5000_1.volume(0.8);
   Serial.begin(115200);
@@ -665,7 +684,7 @@ void loop() {
         float note_freq = noteToFreq((int)rx.byte2);
         for(int i = 0; i<=nvoices; i++){
           if(i == nvoices){  // out of voices, steal
-            voices[voicenum].noteOff();
+            // voices[voicenum].noteOff();
             voice_noteOn(voicenum, note_freq, (int)rx.byte2, (int)rx.byte3);
             voicenum++;
             voicenum = voicenum % nvoices;

@@ -112,7 +112,7 @@ char parameter_names[nparams][6]={
   "LFO_A","LFO_F","LFO_M","","","","","", // 48-55
   "","","","","","","","", // 56-63
   "","","","","","","WAVET","F_RES", // 64-71
-  "A_REL","A_ATK","F_CUT","A_SUS","F_ENV","F_TYP","F_MOD","", // 72-79
+  "A_REL","A_ATK","F_CUT","A_SUS","F_ENV","F_TYP","F_MOD","KEYTR", // 72-79
   "A_DEC","","","","","ROOM","DAMP","BIT_D", // 80-87
   "SRR","","","REV_S","","","","", // 88-95
   "","","","","","","","", // 96-103
