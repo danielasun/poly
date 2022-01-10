@@ -72,8 +72,8 @@ void ls_root(){
 // filesystem sizes
 const int nparams = 128;
 const int npatches = 64;
-float patchdata[npatches][nparams];
-float patchdata2[npatches][nparams];
+byte patchdata[npatches][nparams];
+byte patchdata2[npatches][nparams];
 int patchesfilesize = sizeof(float)*nparams*npatches;
 
 const int npatchchar = 16;
@@ -146,9 +146,9 @@ int initPatchStorage(){
   return status;
 }
 
-void printPatch(byte patch[], char buff[]){
+void printPatch(byte patch_arr[], char buff[]){
   for (int i=0; i < nparams; i++){
-    sprintf(buff, "i: %d, param: %s val: %d", i, parameter_names[i], patch[i]);
+    sprintf(buff, "i: %d, param: %s val: %d", i, parameter_names[i], patch_arr[i]);
     Serial.println(buff);
   }
 }

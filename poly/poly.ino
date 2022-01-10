@@ -187,13 +187,30 @@ Current abilities @ 1/4/21
 TODO: 
 - fm between operators? 
 - patch saving?
-
+  - serial based API for making file changes
+    o P load patch, P %d for location 
+    o S save patch, S %d %s for location and patch name
+    o D display patches, D %d to go up or down
+    o L list all patches in bank, L
+    o M menu, M %d: menu enum
+    o E edit, E %d %d %c: menu, parameter, value
+- lag processor on filter and for pitch control to reduce stepping
+- implement performance controls and mod matrix
+  - pitchbend
+  - mod wheel
+  - breath control
+  - aftertouch
+  - channel pressure
+  - mod matrix:
+    o 2d array for each mod input
+    o maps low and high values, linear mapping for all for now
 - use isActive() vs. freqtable[i] == -1 to detect if voices are done playing.
 */
 
 #include "MIDIUSB.h"
 #include <math.h> //<cmath> in case of c++
 #include "patch.h"
+
 // util //
 const int ledPin = 13;
 int midi_counter = 0;
@@ -320,6 +337,10 @@ float fine_detune_map(byte cc){// semitones
   return  (SEMITONE_RATIO-1)*pow(map_cc_to_range_linear(cc, -1, 1), 3);
 }
 
+// patchdata //
+int patch_i = 0;
+char patchname[] = "init_patch";
+
 // filter //
 float fc_freq = noteToFreq(127); // filter cutoff frequency
 float keytrack_amt = 0; // number from 0 to 1 setting how much the filter tracks the note.
@@ -372,8 +393,8 @@ class Voice {
       this->m_fenv->release(250);
       this->m_filter->frequency(noteToFreq(100));
       this->m_filter->octaveControl(2);
-      this->m_osc1->begin(0.4, 220, WAVEFORM_SAWTOOTH);
-      this->m_osc2->begin(0.4, 220, WAVEFORM_SAWTOOTH);
+      this->m_osc1->begin(WAVEFORM_SINE); //0.4, 220, WAVEFORM_SAWTOOTH);
+      this->m_osc2->begin(WAVEFORM_SINE); //0.4, 220, WAVEFORM_SAWTOOTH);
       this->m_oscmixer->gain(2, 0);
       this->m_fmodmixer->gain(0, 1);
 
@@ -412,9 +433,9 @@ Voice v3(&waveformMod3, &waveformMod7, &envelope3, &envelope7, &filter3, &oscmix
 Voice v4(&waveformMod4, &waveformMod8, &envelope4, &envelope8, &filter4, &oscmixer4, &filter_mod_mixer4, &filter_mixer4);
 
 const int nvoices = 4;
-int voicenum = 0;
 Voice voices[nvoices] = {v1, v2, v3, v4};
 int freqtable[nvoices] = {-1, -1, -1, -1}; // holds frequencies
+int voicenum = 0;
 
 void voice_set_filter_frequency(int voicenum, float fc_freq, float keytrack_amt){
   
@@ -439,7 +460,11 @@ void voice_noteOn(int voicenum, float note_freq, int note, int velocity){
   }
 }
 
-void modifyPatch(int cc, byte val){
+void modifyPatch(int cc, byte val, byte * patchdata){
+  
+  // set patch data
+  patchdata[cc] = val;
+
   AudioNoInterrupts();
   if (cc == 7){ // volume
         amp1.gain(map_cc_to_range_linear(val, 0.0, 1.0));
@@ -617,6 +642,14 @@ void modifyPatch(int cc, byte val){
   AudioInterrupts();
 }
 
+void setPatchData(byte curr_patch[], byte patch_data[]){ // load patch_data into current patch
+  for (int i =0; i<patch::nparams; i++){
+    // sprintf(buff, "i: %d, param: %s val: %d", i, patch::parameter_names[i], patch::initpatch[i]);
+    // Serial.println(buff);
+    modifyPatch(i, patch_data[i], curr_patch);
+  }
+}
+
 void setup() {
   // put your setup code here, to run once:
   AudioMemory(400);
@@ -625,11 +658,6 @@ void setup() {
   Serial.begin(115200);
   pinMode(ledPin, OUTPUT);
   amp1.gain(1);
-
-  for (int i = 0; i<128; i++){
-    sprintf(buff, "%f, %f", noteToFreq((float)i), noteToFreq(i));
-    Serial.println(buff);
-  }
 
   //voices init
   for(int i=0; i<nvoices; i++){
@@ -640,12 +668,7 @@ void setup() {
   patch::initSDCard();
 
 
-  for (int i =0; i<patch::nparams; i++){
-    sprintf(buff, "i: %d, param: %s val: %d", i, patch::parameter_names[i], patch::initpatch[i]);
-    Serial.println(buff);
-    modifyPatch(i, patch::initpatch[i]);
-  }
-
+  setPatchData(patch::patchdata[patch_i], patch::initpatch);
   patch::printPatch(patch::initpatch, buff);
   
   fmmixer.gain(0, 0.0);
@@ -733,7 +756,7 @@ void loop() {
       }
 
       else if (rx.header == 0x0B){ // control change
-        modifyPatch((int)rx.byte2, rx.byte3);
+        modifyPatch((int)rx.byte2, rx.byte3, patch::patchdata[patch_i]);
       }
     }
       
